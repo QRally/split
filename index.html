@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QRally Precision v1.3.3</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        :root { --bg: #000; --card: #1a1a1a; --accent: #ffcc00; --pass: #2ecc71; --locked: #333; --info: #3498db; }
+        body { background: var(--bg); color: #fff; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 10px; padding-bottom: 120px; text-align: center; }
+        h1 { font-weight: 800; color: var(--accent); margin: 15px 0 5px 0; user-select: none; }
+        
+        /* Cumulative Total Header */
+        #total-display { background: #222; padding: 10px; border-radius: 10px; margin-bottom: 15px; border: 1px solid #444; }
+        .total-label { font-size: 0.7rem; color: #888; text-transform: uppercase; }
+        .total-clock { font-size: 1.8rem; font-family: monospace; color: var(--pass); font-weight: bold; }
+
+        .checkpoint {
+            background: var(--card); border-radius: 15px; padding: 15px; margin-bottom: 12px;
+            border-left: 10px solid var(--locked); transition: all 0.4s ease; opacity: 0.4;
+        }
+        .active { opacity: 1; border-left-color: var(--accent); transform: scale(1.02); }
+        .passed { opacity: 1; border-left-color: var(--pass); }
+        
+        .label { font-size: 0.75rem; color: #aaa; text-transform: uppercase; font-weight: bold; }
+        .time { font-size: 2.2rem; font-family: monospace; color: var(--accent); margin: 5px 0; letter-spacing: -1px; }
+        .passed .time { color: var(--pass); }
+        .split { font-size: 1rem; color: #ffcc00; font-weight: bold; background: #332b00; display: inline-block; padding: 4px 12px; border-radius: 5px; margin-bottom: 5px; font-family: monospace; }
+        
+        #status-bar { position: fixed; bottom: 0; left: 0; width: 100%; background: #222; padding: 12px; font-size: 0.8rem; border-top: 2px solid #444; color: #0f0; font-family: monospace; box-sizing: border-box; z-index: 100; }
+        .action-btn { color: #000; border: none; padding: 15px; font-weight: bold; border-radius: 8px; margin-top: 10px; display: none; cursor: pointer; font-size: 1rem; width: 90%; }
+        #dl-btn { background: var(--pass); }
+        #qr-btn { background: var(--info); }
+
+        #qr-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 1000; flex-direction: column; align-items: center; justify-content: center; }
+        #qrcode { padding: 20px; background: white; border-radius: 10px; margin-bottom: 20px; }
+        .close-btn { background: #e74c3c; color: white; border: none; padding: 10px 30px; border-radius: 5px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1 onclick="secretReset()">QRALLY v1.3.3</h1>
+
+    <div id="total-display">
+        <div class="total-label">Cumulative Rally Time</div>
+        <div id="total-clock" class="total-clock">00:00.000</div>
+    </div>
+
+    <div id="rally-points"></div>
+    
+    <button id="dl-btn" class="action-btn" onclick="downloadResults()">📥 DOWNLOAD LOG (.TXT)</button>
+    <button id="qr-btn" class="action-btn" onclick="showQR()">📱 SHOW MARSHAL QR</button>
+
+    <div id="qr-modal">
+        <div id="qrcode"></div>
+        <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">CLOSE</button>
+    </div>
+
+    <div id="status-bar">Waiting for GPS...</div>
+
+    <script>
+        const RALLY_CONFIG = [
+            [52.126435, -4.098710], 
+            [52.163287, -4.131706], 
+            [52.181630, -4.128351], 
+            [52.179180, -4.123524]  
+        ];
+
+        const RADIUS_METERS = 30; 
+        let currentIdx = 0;
+        let checkPoints = [];
+        let resetTaps = 0;
+
+        function formatTime(date) {
+            return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}.${String(date.getMilliseconds()).padStart(3, '0')}`;
+        }
+
+        function formatDuration(msDiff) {
+            const m = Math.floor(msDiff / 60000);
+            const s = Math.floor((msDiff % 60000) / 1000);
+            const ms = Math.floor(msDiff % 1000);
+            return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+        }
+
+        function initData() {
+            const savedData = JSON.parse(localStorage.getItem('qrally_v133_data') || "[]");
+            currentIdx = parseInt(localStorage.getItem('qrally_v133_idx') || "0");
+            
+            checkPoints = RALLY_CONFIG.map((coords, i) => ({
+                id: `cp${i}`, lat: coords[0], lon: coords[1],
+                passed: i < currentIdx,
+                time: savedData[i]?.time || '--:--:--.---',
+                split: savedData[i]?.split || '',
+                rawTimestamp: savedData[i]?.rawTimestamp || null
+            }));
+
+            updateTotalClock();
+            if (currentIdx === checkPoints.length) toggleEndButtons(true);
+        }
+
+        function updateTotalClock() {
+            if (currentIdx > 1) {
+                const totalMs = checkPoints[currentIdx - 1].rawTimestamp - checkPoints[0].rawTimestamp;
+                document.getElementById('total-clock').innerText = formatDuration(totalMs);
+            }
+        }
+
+        function renderUI() {
+            const container = document.getElementById('rally-points');
+            container.innerHTML = checkPoints.map((cp, i) => `
+                <div id="${cp.id}" class="checkpoint ${cp.passed ? 'passed' : (i === currentIdx ? 'active' : '')}">
+                    <div class="label">Checkpoint ${i + 1}</div>
+                    <div class="time">${cp.time}</div>
+                    ${cp.split ? `<div class="split">SPLIT: ${cp.split}</div>` : ''}
+                </div>
+            `).join('');
+        }
+
+        function getDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3; 
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        function startTracking() {
+            navigator.geolocation.watchPosition((pos) => {
+                const myLat = pos.coords.latitude, myLon = pos.coords.longitude;
+                const status = document.getElementById('status-bar');
+                if (currentIdx < checkPoints.length) {
+                    status.innerText = `GPS: ${myLat.toFixed(5)}, ${myLon.toFixed(5)} | Target: CP ${currentIdx + 1}`;
+                    if (getDistance(myLat, myLon, checkPoints[currentIdx].lat, checkPoints[currentIdx].lon) < RADIUS_METERS) handleHit(checkPoints[currentIdx]);
+                } else {
+                    status.innerText = "🏁 RALLY COMPLETE";
+                    toggleEndButtons(true);
+                }
+            }, null, { enableHighAccuracy: true });
+        }
+
+        function handleHit(cp) {
+            const now = new Date();
+            cp.rawTimestamp = now.getTime();
+            cp.time = formatTime(now);
+            cp.split = currentIdx > 0 ? formatDuration(cp.rawTimestamp - checkPoints[currentIdx - 1].rawTimestamp) : "START";
+            cp.passed = true;
+            currentIdx++;
+            
+            localStorage.setItem('qrally_v133_data', JSON.stringify(checkPoints));
+            localStorage.setItem('qrally_v133_idx', currentIdx);
+            
+            updateTotalClock();
+            renderUI();
+            if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+        }
+
+        function toggleEndButtons(show) {
+            document.getElementById('dl-btn').style.display = document.getElementById('qr-btn').style.display = show ? 'inline-block' : 'none';
+        }
+
+        function showQR() {
+            const qrBox = document.getElementById("qrcode");
+            qrBox.innerHTML = "";
+            const total = document.getElementById('total-clock').innerText;
+            const dataString = `TOTAL:${total}|` + checkPoints.map(cp => `${cp.time},${cp.split}`).join('|');
+            new QRCode(qrBox, { text: dataString, width: 220, height: 220 });
+            document.getElementById('qr-modal').style.display = 'flex';
+        }
+
+        function downloadResults() {
+            let text = `QRALLY LOG\nTotal Time: ${document.getElementById('total-clock').innerText}\n---\n`;
+            checkPoints.forEach((cp, i) => { text += `CP ${i+1}: ${cp.time} [Split: ${cp.split}]\n`; });
+            const blob = new Blob([text], { type: 'text/plain' });
+            const anchor = document.createElement('a');
+            anchor.download = `rally_total_log.txt`;
+            anchor.href = URL.createObjectURL(blob);
+            anchor.click();
+        }
+
+        function secretReset() {
+            resetTaps++;
+            if (resetTaps >= 5) { if(confirm("WIPE ALL DATA?")) { localStorage.clear(); location.reload(); } resetTaps = 0; }
+            setTimeout(() => { resetTaps = 0; }, 2000);
+        }
+
+        window.onload = () => { initData(); renderUI(); startTracking(); };
+    </script>
+</body>
+</html>
